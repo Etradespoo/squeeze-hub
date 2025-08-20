@@ -1,0 +1,13 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+
+# Streamlit specific
+.streamlit/secrets.toml
