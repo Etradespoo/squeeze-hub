@@ -1,1 +1,1 @@
-fukc this stupid fucking readme
+Nothing to read
