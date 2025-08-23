@@ -1,346 +1,251 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as _time
 from functools import lru_cache
 from typing import Dict, Tuple, Optional
+from zoneinfo import ZoneInfo
 import logging
 
-# Configure logging
+# Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ============================================================================
-# CONSTANTS
-# ============================================================================
-
-# Market schedules (all times in ET)
-MARKET_SCHEDULES = {
-    "NY": {
-        "open": (9, 30),
-        "close": (16, 0),
-        "days": list(range(5)),  # Monday-Friday
-        "name": "NYSE"
-    },
-    "London": {
-        "open": (3, 0),
-        "close": (11, 30),
-        "days": list(range(5)),  # Monday-Friday
-        "name": "LSE"
-    },
-    "Asian": {
-        "open": (19, 0),
-        "close": (1, 0),
-        "days": [6, 0, 1, 2, 3, 4],  # Sunday-Friday
-        "name": "Tokyo"
-    }
-}
-
-# Time constants
-WEEKEND_TO_MONDAY = 3
-SATURDAY_TO_MONDAY = 2
-SUNDAY_TO_MONDAY = 1
-NEXT_TRADING_DAY = 1
-
-# UI Constants
+# Constants
 PLACEHOLDER = "--"
 DEFAULT_SYMBOL = "NVDA"
 DEFAULT_TIMEFRAME_INDEX = 5  # "1M"
 DEFAULT_MONTHS_BACK = 12
-
-# Cache TTL (5 minutes for market times, longer for static data)
 MARKET_CACHE_TTL = 300
 STATIC_DATA_TTL = 3600
 
-# ============================================================================
-# PAGE CONFIGURATION
-# ============================================================================
+# Market configurations
+MARKET_CONFIG = {
+    "NY": {"tz": "America/New_York", "open": _time(9, 30), "close": _time(16, 0)},
+    "London": {"tz": "Europe/London", "open": _time(8, 0), "close": _time(16, 30)},
+    "Asian": {"tz": "Asia/Tokyo", "open": _time(9, 0), "close": _time(15, 0)},
+}
 
+# Page config
 st.set_page_config(
     page_title="Stock Fundamentals Dashboard",
     page_icon="📊",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="collapsed",
 )
 
-# ============================================================================
-# OPTIMIZED CSS (Consolidated and Minimized)
-# ============================================================================
-
-DASHBOARD_CSS = """
+# Styles
+st.markdown("""
 <style>
-    /* Core Theme */
-    .stApp { background-color: #1e1e2e; color: #cdd6f4; }
-    
-    /* Header */
-    .main-header { text-align: center; padding: 2rem 0; margin-bottom: 2rem; }
-    .main-header h1 { color: #89b4fa; font-size: 2.5rem; font-weight: 700; margin-bottom: 0.5rem; letter-spacing: 1px; }
-    .main-header p { color: #a6adc8; font-size: 1.1rem; margin: 0; }
-    
-    /* Universal Stats Box */
-    .universal-stats {
-        position: fixed; top: 20px; right: 20px;
-        background-color: #313244; border-radius: 8px;
-        padding: 1.14rem; border: 1px solid #45475a;
-        width: 305px; z-index: 9999;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-    }
-    .stats-title { color: #89b4fa; font-size: 0.92rem; font-weight: 600; margin-bottom: 0.5rem; text-align: center; text-transform: uppercase; letter-spacing: 0.5px; }
-    .timer-row { display: flex; justify-content: space-between; margin-bottom: 0.5rem; }
-    .timer-row:last-child { margin-bottom: 0; }
-    .timer-item { text-align: center; flex: 1; padding: 0 0.25rem; }
-    .timer-label { color: #a6adc8; font-size: 0.75rem; font-weight: 500; display: block; margin-bottom: 0.1rem; }
-    .timer-value { color: #a6e3a1; font-size: 0.75rem; font-weight: 600; font-family: monospace; display: block; }
-    .timer-value.active { color: #b4f7b4; }
-    
-    /* Input Styling */
-    .input-container { background-color: #313244; border-radius: 12px; padding: 2rem; margin-bottom: 3rem; border: 1px solid #45475a; }
-    .stTextInput > div > div > input, .stNumberInput > div > div > input {
-        background-color: #45475a; color: #cdd6f4;
-        border: 1px solid #6c7086; border-radius: 8px;
-        padding: 0.75rem; height: 40px;
-    }
-    .stTextInput > div > div > input:focus, .stNumberInput > div > div > input:focus {
-        border-color: #89b4fa;
-        box-shadow: 0 0 0 2px rgba(137, 180, 250, 0.2);
-    }
-    .stSelectbox > div > div > div {
-        background-color: #45475a; color: #cdd6f4;
-        border: 1px solid #6c7086; border-radius: 8px; height: 40px;
-    }
-    
-    /* Table Styling */
-    .table-container { background-color: #313244; border-radius: 12px; padding: 2rem; border: 1px solid #45475a; margin-top: 2rem; }
-    .stDataFrame { background-color: transparent; }
-    
-    /* Consolidated border removal for dataframes */
-    .stDataFrame, .stDataFrame *, 
-    div[data-testid="stDataFrame"],
-    div[data-testid="stDataFrame"] > div,
-    .stDataFrame table, .stDataFrame thead, 
-    .stDataFrame tbody, .stDataFrame tr, 
-    .stDataFrame td, .stDataFrame th {
-        border-bottom: none !important;
-        border: none !important;
-    }
-    
-    /* Hide Streamlit defaults */
-    #MainMenu, footer, header { visibility: hidden; }
-    
-    /* Labels */
-    .stTextInput > label, .stSelectbox > label, .stNumberInput > label {
-        color: #a6adc8; font-weight: 500; margin-bottom: 0.5rem;
-    }
+  .stApp { background-color:#1e1e2e; color:#cdd6f4; }
+
+  /* Header */
+  .main-header { text-align:center; padding:2rem 0 1.25rem 0; }
+  .main-header h1 { color:#89b4fa; font-size:2.5rem; font-weight:700; margin:0 0 .5rem 0; letter-spacing:1px; }
+  .main-header p { color:#a6adc8; margin:0; }
+
+  /* Stats box */
+  .universal-stats {
+    position: fixed; top: 20px; right: 20px; background-color: #313244; border-radius: 8px;
+    padding: 1.14rem; border: 1px solid #45475a; width: 305px; z-index: 9999;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+  }
+  .stats-title {
+    color: #89b4fa; font-size: 0.92rem; font-weight: 600; margin-bottom: 0.5rem;
+    text-align: center; text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .timer-row { display: flex; justify-content: space-between; margin-bottom: 0.5rem; }
+  .timer-row:last-child { margin-bottom: 0; }
+  .timer-item { text-align: center; flex: 1; padding: 0 0.25rem; }
+  .timer-label { color: #a6adc8; font-size: 0.75rem; font-weight: 500; display: block; margin-bottom: 0.1rem; }
+  .timer-value { color: #a6e3a1; font-size: 0.75rem; font-weight: 600; font-family: monospace; display: block; }
+  .timer-value.active { color: #b4f7b4; }
+
+  /* Input styling */
+  .stTextInput > div > div > input, .stNumberInput > div > div > input, .stSelectbox > div > div > div {
+    background:#45475a; color:#cdd6f4; border:1px solid #6c7086; border-radius:8px; height:40px;
+  }
+  .stTextInput > div > div > input, .stNumberInput > div > div > input { padding:.75rem; }
+  .stTextInput > div > div > input:focus, .stNumberInput > div > div > input:focus {
+    border-color:#89b4fa; box-shadow:0 0 0 2px rgba(137,180,250,.2);
+  }
+  .stTextInput > label, .stSelectbox > label, .stNumberInput > label {
+    color:#a6adc8; font-weight:500; margin-bottom:.5rem;
+  }
+
+  /* Button styling - PROPERLY CENTERED */
+  div[data-testid="stButton"] {
+    display: flex !important;
+    justify-content: center !important;
+    width: 100% !important;
+    margin: 0.5rem 0 !important;
+  }
+  div[data-testid="stButton"] > button {
+    width: 160px !important; 
+    background-color: #a6e3a1 !important; 
+    border-color: #a6e3a1 !important;
+    color: #0b0f14 !important; 
+    font-weight: 600 !important; 
+    font-size: 0.85rem !important;
+    border-radius: 7px !important; 
+    padding: 0.42rem 0.9rem !important;
+  }
+  div[data-testid="stButton"] > button:hover { 
+    filter: brightness(0.95); 
+  }
+
+  /* Section styling */
+  h3 { color:#89b4fa; margin:1.25rem 0 .75rem 0; }
+  .section-divider { border:none; border-top:1px solid #45475a; margin:2rem 0 1.25rem 0; }
+  .stDataFrame { background:transparent; }
+  .stDataFrame, .stDataFrame * { border:none !important; }
 </style>
-"""
+""", unsafe_allow_html=True)
 
-st.markdown(DASHBOARD_CSS, unsafe_allow_html=True)
-
-# ============================================================================
-# OPTIMIZED MARKET TIME CALCULATIONS
-# ============================================================================
-
+# Market timing functions
 @lru_cache(maxsize=128)
-def calculate_next_market_open(market_name: str, current_hour: int, current_minute: int, 
-                              current_weekday: int) -> Tuple[bool, Optional[int]]:
-    """
-    Calculate if market is open and minutes until next open.
-    Cached by input parameters to avoid recalculation.
-    
-    Returns: (is_open, minutes_until_next_open)
-    """
-    schedule = MARKET_SCHEDULES.get(market_name)
-    if not schedule:
-        return False, None
-    
-    open_hour, open_minute = schedule["open"]
-    close_hour, close_minute = schedule["close"]
-    
-    # Convert current time to minutes since midnight
-    current_minutes = current_hour * 60 + current_minute
-    open_minutes = open_hour * 60 + open_minute
-    close_minutes = close_hour * 60 + close_minute
-    
-    # Special handling for Asian market (crosses midnight)
-    if market_name == "Asian":
-        if current_weekday == 6 and current_minutes >= open_minutes:  # Sunday evening
-            return True, None
-        elif current_weekday in range(5):  # Monday-Friday
-            if current_minutes <= close_minutes or current_minutes >= open_minutes:
-                return True, None
-    else:
-        # Standard markets (NY, London)
-        if current_weekday in schedule["days"]:
-            if open_minutes <= current_minutes <= close_minutes:
-                return True, None
-    
-    # Calculate minutes until next open
-    minutes_to_next = calculate_minutes_to_next_open(
-        market_name, current_weekday, current_minutes, open_minutes
-    )
-    
-    return False, minutes_to_next
+def calculate_next_market_open(market_name: str, _h: int, _m: int, _wd: int) -> Tuple[bool, Optional[int]]:
+    """Calculate market status and time until next open."""
+    try:
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        config = MARKET_CONFIG.get(market_name)
+        if not config:
+            return False, None
 
-def calculate_minutes_to_next_open(market_name: str, weekday: int, 
-                                  current_minutes: int, open_minutes: int) -> int:
-    """Calculate minutes until next market open."""
-    schedule = MARKET_SCHEDULES[market_name]
-    
-    # If it's a trading day and before open
-    if weekday in schedule["days"] and current_minutes < open_minutes:
-        return open_minutes - current_minutes
-    
-    # Calculate days until next trading day
-    if weekday == 4:  # Friday
-        days_ahead = WEEKEND_TO_MONDAY
-    elif weekday == 5:  # Saturday
-        days_ahead = SATURDAY_TO_MONDAY
-    elif weekday == 6:  # Sunday
-        if market_name == "Asian" and current_minutes < open_minutes:
-            return open_minutes - current_minutes  # Opens Sunday evening
-        days_ahead = SUNDAY_TO_MONDAY
-    else:  # Monday-Thursday
-        days_ahead = NEXT_TRADING_DAY
-    
-    # Convert to minutes
-    return (days_ahead * 1440) + open_minutes - current_minutes
+        tz = ZoneInfo(config["tz"])
+        now_local = now_et.astimezone(tz)
+        
+        # Skip weekends
+        if now_local.weekday() > 4:
+            next_day = now_local + timedelta(days=(7 - now_local.weekday()))
+            next_open = datetime.combine(next_day.date(), config["open"], tzinfo=tz)
+            return False, _minutes_until(next_open.astimezone(ZoneInfo("America/New_York")), now_et)
+
+        local_open = datetime.combine(now_local.date(), config["open"], tzinfo=tz)
+        local_close = datetime.combine(now_local.date(), config["close"], tzinfo=tz)
+
+        if now_local < local_open:
+            return False, _minutes_until(local_open.astimezone(ZoneInfo("America/New_York")), now_et)
+        elif local_open <= now_local <= local_close:
+            return True, None
+        else:
+            # Market closed, find next business day
+            next_day = now_local + timedelta(days=1)
+            while next_day.weekday() > 4:
+                next_day += timedelta(days=1)
+            next_open = datetime.combine(next_day.date(), config["open"], tzinfo=tz)
+            return False, _minutes_until(next_open.astimezone(ZoneInfo("America/New_York")), now_et)
+
+    except Exception as e:
+        logger.error(f"Market calculation failed for {market_name}: {e}")
+        return False, None
+
+def _minutes_until(target_dt: datetime, now_dt: datetime) -> int:
+    """Helper to calculate minutes between two datetime objects."""
+    return max(0, int((target_dt - now_dt).total_seconds() // 60))
 
 @st.cache_data(ttl=MARKET_CACHE_TTL)
 def get_session_times() -> Dict[str, str]:
-    """
-    Get formatted time until market sessions.
-    Cached for 5 minutes to reduce computation.
-    """
+    """Get current market session times."""
     try:
         now = datetime.now()
-        current_hour = now.hour
-        current_minute = now.minute
-        current_weekday = now.weekday()
-        
         results = {}
         
-        for market in ["NY", "London", "Asian"]:
+        for market in MARKET_CONFIG.keys():
             is_open, minutes_until = calculate_next_market_open(
-                market, current_hour, current_minute, current_weekday
+                market, now.hour, now.minute, now.weekday()
             )
             
             if is_open:
                 results[market] = "Now"
                 results[f"{market}_active"] = True
             else:
-                results[market] = format_time_duration(minutes_until)
+                results[market] = _format_duration(minutes_until)
                 results[f"{market}_active"] = False
-        
+                
         return results
-        
     except Exception as e:
-        logger.error(f"Market time calculation failed: {e}")
-        return {
-            "NY": "Error", "London": "Error", "Asian": "Error",
-            "NY_active": False, "London_active": False, "Asian_active": False
-        }
+        logger.error(f"Session times calculation failed: {e}")
+        return {market: "Error" for market in MARKET_CONFIG.keys()} | \
+               {f"{market}_active": False for market in MARKET_CONFIG.keys()}
 
-def format_time_duration(minutes: Optional[int]) -> str:
+def _format_duration(minutes: Optional[int]) -> str:
     """Format minutes into readable duration."""
-    if minutes is None or minutes <= 0:
+    if not minutes or minutes <= 0:
         return "Now"
     
-    days = minutes // 1440
-    hours = (minutes % 1440) // 60
-    mins = minutes % 60
+    days, remainder = divmod(minutes, 1440)
+    hours, mins = divmod(remainder, 60)
     
-    if days > 0:
-        return f"{days}d {hours:02d}:{mins:02d}"
-    return f"{hours:02d}:{mins:02d}"
-
-# ============================================================================
-# ECONOMIC CALENDAR (Placeholder)
-# ============================================================================
+    return f"{days}d {hours:02d}:{mins:02d}" if days else f"{hours:02d}:{mins:02d}"
 
 @st.cache_data(ttl=STATIC_DATA_TTL)
 def get_economic_calendar() -> Dict[str, str]:
-    """
-    Get economic calendar data.
-    TODO: Implement actual data source integration.
-    """
+    """Get economic calendar data (placeholder)."""
     return {"FOMC": "TBD", "NFP": "TBD", "CPI": "TBD"}
-
-# ============================================================================
-# DATA CREATION (Optimized with module-level caching)
-# ============================================================================
-
-# Pre-create static DataFrames at module level
-SQUEEZE_DATA = pd.DataFrame({
-    "Compression": ["Red Squeeze", "Black Squeeze", "Total"],
-    "Total Squeezes": [PLACEHOLDER] * 3,
-    "Fired Long": [PLACEHOLDER] * 3,
-    "Fired Short": [PLACEHOLDER] * 3,
-    "Avg Length of Squeeze": [PLACEHOLDER] * 3,
-    "Avg Move Length": [PLACEHOLDER] * 3,
-    "Avg Move %": [PLACEHOLDER] * 3,
-    "% Fire w/ Trend": [PLACEHOLDER] * 3
-})
-
-FUNDAMENTAL_DATA = pd.DataFrame({
-    "% Change (3 Years)": [PLACEHOLDER],
-    "% Change (1 Year)": [PLACEHOLDER],
-    "% Change (3 Months)": [PLACEHOLDER],
-    "% Change (1 Month)": [PLACEHOLDER],
-    "% Change (10 Days)": [PLACEHOLDER],
-    "EPS Growth (Quarterly)": [PLACEHOLDER],
-    "EPS Growth (Annual)": [PLACEHOLDER],
-    "Revenue Growth (Quarterly)": [PLACEHOLDER],
-    "Revenue Growth (Annual)": [PLACEHOLDER],
-    "Upcoming Earnings Date": [PLACEHOLDER]
-})
-
-OPTIONS_DATA = pd.DataFrame({
-    "Implied Volatility": [PLACEHOLDER],
-    "Liquidity": [PLACEHOLDER],
-    "Short Interest": [PLACEHOLDER],
-    "Days to Cover": [PLACEHOLDER],
-    "Total Open Interest": [PLACEHOLDER]
-})
 
 @st.cache_data(ttl=STATIC_DATA_TTL)
 def get_dataframes(symbol: str = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Get dataframes for display. In production, would fetch real data based on symbol.
-    Returns copies to prevent mutation.
-    """
-    # In production, fetch real data based on symbol
-    # For now, return copies of static data
-    return SQUEEZE_DATA.copy(), FUNDAMENTAL_DATA.copy(), OPTIONS_DATA.copy()
+    """Generate placeholder dataframes for the dashboard."""
+    squeeze_df = pd.DataFrame({
+        "Compression": ["Red Squeeze", "Black Squeeze", "Total"],
+        "Total Squeezes": [PLACEHOLDER] * 3,
+        "Fired Long": [PLACEHOLDER] * 3,
+        "Fired Short": [PLACEHOLDER] * 3,
+        "Avg Length of Squeeze": [PLACEHOLDER] * 3,
+        "Avg Move Length": [PLACEHOLDER] * 3,
+        "Avg Move %": [PLACEHOLDER] * 3,
+        "% Fire w/ Trend": [PLACEHOLDER] * 3
+    })
+    
+    fundamental_df = pd.DataFrame({
+        "% Change (3 Years)": [PLACEHOLDER],
+        "% Change (1 Year)": [PLACEHOLDER],
+        "% Change (3 Months)": [PLACEHOLDER],
+        "% Change (1 Month)": [PLACEHOLDER],
+        "% Change (10 Days)": [PLACEHOLDER],
+        "EPS Growth (Quarterly)": [PLACEHOLDER],
+        "EPS Growth (Annual)": [PLACEHOLDER],
+        "Revenue Growth (Quarterly)": [PLACEHOLDER],
+        "Revenue Growth (Annual)": [PLACEHOLDER],
+        "Upcoming Earnings Date": [PLACEHOLDER]
+    })
+    
+    options_df = pd.DataFrame({
+        "Implied Volatility": [PLACEHOLDER],
+        "Liquidity": [PLACEHOLDER],
+        "Short Interest": [PLACEHOLDER],
+        "Days to Cover": [PLACEHOLDER],
+        "Total Open Interest": [PLACEHOLDER]
+    })
+    
+    return squeeze_df, fundamental_df, options_df
 
-# ============================================================================
-# UI RENDERING
-# ============================================================================
-
+# UI Components
 def render_header():
-    """Render the main header."""
+    """Render the main dashboard header."""
     st.markdown("""
     <div class="main-header">
-        <h1>Stock Fundamentals Dashboard</h1>
-        <p>Clean, minimal analysis for your trading strategy</p>
+      <h1>Stock Fundamentals Dashboard</h1>
+      <p>Clean, minimal analysis for your trading strategy</p>
     </div>
     """, unsafe_allow_html=True)
 
 def render_stats_box(session_times: Dict[str, str], economic_data: Dict[str, str]):
-    """Render the universal stats box."""
-    # Build HTML using string concatenation (more efficient than f-strings for static content)
+    """Render the fixed position stats box."""
     html = '<div class="universal-stats"><div class="stats-title">Date Until</div>'
     
-    # Economic data row
+    # Economic events row
     html += '<div class="timer-row">'
-    for key in ["FOMC", "NFP", "CPI"]:
+    for event in ["FOMC", "NFP", "CPI"]:
         html += f'''<div class="timer-item">
-            <div class="timer-label">{key}</div>
-            <div class="timer-value">{economic_data[key]}</div>
+            <div class="timer-label">{event}</div>
+            <div class="timer-value">{economic_data[event]}</div>
         </div>'''
     html += '</div>'
     
-    # Market times row
+    # Market sessions row
     html += '<div class="timer-row">'
-    for market in ["NY", "London", "Asian"]:
+    for market in MARKET_CONFIG.keys():
         active_class = ' active' if session_times.get(f'{market}_active', False) else ''
         html += f'''<div class="timer-item">
             <div class="timer-label">{market}</div>
@@ -350,111 +255,75 @@ def render_stats_box(session_times: Dict[str, str], economic_data: Dict[str, str
     
     st.markdown(html, unsafe_allow_html=True)
 
-def render_input_section() -> Tuple[str, str, int]:
+def render_inputs() -> Tuple[str, str, int]:
     """Render input controls and return values."""
     col1, col2, col3 = st.columns([1, 1, 1])
     
     with col1:
         symbol = st.text_input(
-            "Stock Symbol",
-            value=DEFAULT_SYMBOL,
-            placeholder="Enter symbol (e.g., AAPL, TSLA)",
-            help="Enter the stock ticker symbol",
-            max_chars=10,
-            key="symbol_input"
+            "Stock Symbol", 
+            value=DEFAULT_SYMBOL, 
+            placeholder="e.g., AAPL, TSLA", 
+            max_chars=10
         )
-        # Only uppercase if not empty
-        symbol = symbol.upper() if symbol else DEFAULT_SYMBOL
-    
+        
     with col2:
         timeframe = st.selectbox(
-            "Timeframe",
-            options=["30m", "1h", "4h", "1D", "1W", "1M", "3M", "6M", "1Y"],
-            index=DEFAULT_TIMEFRAME_INDEX,
-            help="Select the chart timeframe",
-            key="timeframe_select"
+            "Timeframe", 
+            ["30m", "1h", "4h", "1D", "1W", "1M", "3M", "6M", "1Y"], 
+            index=DEFAULT_TIMEFRAME_INDEX
         )
-    
+        
     with col3:
         months_back = st.number_input(
-            "Months Back",
-            min_value=1,
-            max_value=60,
-            value=DEFAULT_MONTHS_BACK,
-            step=1,
-            help="Number of months of historical data",
-            key="months_input"
+            "Months Back", 
+            min_value=1, 
+            max_value=60, 
+            value=DEFAULT_MONTHS_BACK, 
+            step=1
         )
     
-    return symbol, timeframe, months_back
+    return symbol.upper() if symbol else DEFAULT_SYMBOL, timeframe, months_back
 
-def render_data_tables(symbol: str):
-    """Render the data tables."""
-    # Get dataframes
-    df_squeeze, df_fundamental, df_options = get_dataframes(symbol)
+def render_tables(symbol: str):
+    """Render all data tables."""
+    squeeze_df, fundamental_df, options_df = get_dataframes(symbol)
     
-    # Calculate optimal heights based on content
-    squeeze_height = min(50 + len(df_squeeze) * 35, 200)
+    st.markdown('<hr class="section-divider" />', unsafe_allow_html=True)
     
-    # Squeeze Data
     st.markdown("### Squeeze Data")
-    st.dataframe(
-        df_squeeze,
-        use_container_width=True,
-        hide_index=True,
-        height=squeeze_height
-    )
+    st.dataframe(squeeze_df, use_container_width=True, hide_index=True)
     
-    # Fundamental Analysis
     st.markdown("### Fundamental Analysis")
-    st.dataframe(
-        df_fundamental,
-        use_container_width=True,
-        hide_index=True,
-        height=80  # Single row
-    )
+    st.dataframe(fundamental_df, use_container_width=True, hide_index=True)
     
-    # Options & Interest Data
     st.markdown("### Options & Interest Data")
-    st.dataframe(
-        df_options,
-        use_container_width=True,
-        hide_index=True,
-        height=80  # Single row
-    )
-
-# ============================================================================
-# MAIN APPLICATION
-# ============================================================================
+    st.dataframe(options_df, use_container_width=True, hide_index=True)
 
 def main():
-    """Main application entry point."""
-    # Render header
+    """Main application function."""
     render_header()
     
-    # Get market and economic data
+    # Get dynamic data
     session_times = get_session_times()
     economic_data = get_economic_calendar()
-    
-    # Render stats box
     render_stats_box(session_times, economic_data)
     
-    # Render input section and get values
-    symbol, timeframe, months_back = render_input_section()
+    # Input controls
+    symbol, timeframe, months_back = render_inputs()
     
-    # Store in session state for persistence
-    if 'symbol' not in st.session_state:
-        st.session_state.symbol = symbol
-    if 'timeframe' not in st.session_state:
-        st.session_state.timeframe = timeframe
-    if 'months_back' not in st.session_state:
-        st.session_state.months_back = months_back
+    # Create a new full-width container for the button
+    # This breaks out of the column context and centers the button properly
+    button_container = st.container()
+    with button_container:
+        # Use columns with specific ratios to center the button
+        col1, col2, col3 = st.columns([5, 2, 5])
+        with col2:
+            if st.button("Go", type="primary", use_container_width=True):
+                st.rerun()  # Optional: trigger a rerun when clicked
     
-    # Render data tables
-    render_data_tables(symbol)
-    
-    # Footer space
-    st.markdown("<br><br>", unsafe_allow_html=True)
+    # Data tables
+    render_tables(symbol)
 
 if __name__ == "__main__":
     main()
